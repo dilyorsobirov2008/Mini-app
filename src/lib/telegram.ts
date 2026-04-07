@@ -9,7 +9,7 @@ export const getBot = () => {
       console.error('TELEGRAM_BOT_TOKEN is not set!');
       return null;
     }
-    bot = new TelegramBot(token, { polling: true });
+    bot = new TelegramBot(token);
 
     bot.onText(/\/start/, (msg) => {
       const chatId = msg.chat.id;
