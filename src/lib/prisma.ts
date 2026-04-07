@@ -9,15 +9,15 @@ if (process.env.NODE_ENV === 'production') {
   const adapter = new PrismaBetterSqlite3(db);
   prisma = new PrismaClient({ adapter });
 } else {
-  // @ts-ignore
+  // @ts-expect-error
   if (!global.prisma) {
     const sqlite = require('better-sqlite3');
     const db = new sqlite('dev.db');
     const adapter = new PrismaBetterSqlite3(db);
-    // @ts-ignore
+    // @ts-expect-error
     global.prisma = new PrismaClient({ adapter });
   }
-  // @ts-ignore
+  // @ts-expect-error
   prisma = global.prisma;
 }
 

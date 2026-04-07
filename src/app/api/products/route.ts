@@ -26,7 +26,7 @@ export async function POST(req: Request) {
       data: {
         name: data.name,
         description: data.description,
-        price: parseFloat(data.price),
+        price: parseFloat(data.price) || 0,
         image: data.image,
         categoryId: data.categoryId,
       },

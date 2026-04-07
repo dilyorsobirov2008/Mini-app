@@ -218,7 +218,7 @@ export default function ProductsPage() {
                   disabled={loading || uploading}
                   className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg disabled:opacity-50"
                 >
-                  {loading ? 'Saqlanmoqda...' : 'Saves Mahsulot'}
+                  {loading ? 'Saqlanmoqda...' : 'Mahsulotni Saqlash'}
                 </button>
               </div>
             </form>

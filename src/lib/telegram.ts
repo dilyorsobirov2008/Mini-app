@@ -1,10 +1,14 @@
 import TelegramBot from 'node-telegram-bot-api';
 
-const token = process.env.TELEGRAM_BOT_TOKEN || '8642489665:AAGDp8DyCK2DCitVDUC8dNYdYWBRffZKg7E';
+const token = process.env.TELEGRAM_BOT_TOKEN!;
 let bot: TelegramBot | null = null;
 
 export const getBot = () => {
   if (!bot && typeof window === 'undefined') {
+    if (!token) {
+      console.error('TELEGRAM_BOT_TOKEN is not set!');
+      return null;
+    }
     bot = new TelegramBot(token, { polling: true });
 
     bot.onText(/\/start/, (msg) => {
@@ -15,7 +19,7 @@ export const getBot = () => {
             [
               {
                 text: '🛍 Do\'konni ochish',
-                web_app: { url: process.env.NEXT_PUBLIC_APP_URL || 'https://your-domain.com' }
+                web_app: { url: process.env.NEXT_PUBLIC_APP_URL! }
               }
             ]
           ]
@@ -23,10 +27,24 @@ export const getBot = () => {
       });
     });
   }
+
   return bot;
 };
 
-export const sendOrderNotification = async (adminChatId: string, orderDetails: any) => {
+interface OrderItem {
+  name: string;
+  quantity: number;
+}
+
+interface OrderDetails {
+  customerName: string;
+  customerPhone: string;
+  address: string;
+  items: OrderItem[];
+  totalAmount: number;
+}
+
+export const sendOrderNotification = async (adminChatId: string, orderDetails: OrderDetails) => {
   const message = `📦 Yangi buyurtma!\n\n` +
     `👤 Mijoz: ${orderDetails.customerName}\n` +
     `📞 Tel: ${orderDetails.customerPhone}\n` +
