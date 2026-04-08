@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-/* ───── Icons (inline SVG for performance) ───── */
+/* ───── Icons ───── */
 const Icons = {
   search: (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -79,9 +79,11 @@ const Icons = {
 interface Product {
   id: string;
   name: string;
+  slug: string;
   description: string | null;
   price: number;
   image: string | null;
+  stock: number;
   categoryId: string;
   category?: { id: string; name: string };
 }
@@ -97,13 +99,9 @@ interface CartItem extends Product {
   quantity: number;
 }
 
-/* ───── Price formatter ───── */
 const formatPrice = (price: number) =>
   new Intl.NumberFormat('uz-UZ').format(price);
 
-/* ═══════════════════════════════════════════ */
-/*                MAIN COMPONENT               */
-/* ═══════════════════════════════════════════ */
 export default function MiniApp() {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -112,8 +110,14 @@ export default function MiniApp() {
   const [searchTerm, setSearchTerm] = useState('');
   const [showCart, setShowCart] = useState(false);
   const [showCheckout, setShowCheckout] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  
+  // Pagination
   const [loading, setLoading] = useState(true);
-  const [addedProductId, setAddedProductId] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const LIMIT = 20;
 
   // Checkout form
   const [customerName, setCustomerName] = useState('');
@@ -121,12 +125,25 @@ export default function MiniApp() {
   const [address, setAddress] = useState('');
   const [orderSending, setOrderSending] = useState(false);
   const [orderSent, setOrderSent] = useState(false);
+  
+  const [addedProductId, setAddedProductId] = useState<string | null>(null);
+  const observerRef = useRef<IntersectionObserver | null>(null);
 
-  const catScrollRef = useRef<HTMLDivElement>(null);
+  const lastProductElementRef = useCallback((node: HTMLDivElement) => {
+    if (loadingMore) return;
+    if (observerRef.current) observerRef.current.disconnect();
+    observerRef.current = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting && hasMore) {
+        setOffset(prev => prev + LIMIT);
+      }
+    });
+    if (node) observerRef.current.observe(node);
+  }, [loadingMore, hasMore]);
 
+  // Initial Fetch
   useEffect(() => {
-    fetchData();
-    // Telegram Web App expand
+    fetchCategories();
+    // Telegram Web App
     if (typeof window !== 'undefined' && (window as any).Telegram?.WebApp) {
       const tg = (window as any).Telegram.WebApp;
       tg.expand();
@@ -135,31 +152,55 @@ export default function MiniApp() {
     }
   }, []);
 
-  const fetchData = async () => {
-    setLoading(true);
+  // Fetch products when category, search, or offset changes
+  useEffect(() => {
+    fetchProducts(offset === 0);
+  }, [selectedCategory, searchTerm, offset]);
+
+  // Reset when filter changes
+  useEffect(() => {
+    setOffset(0);
+    setProducts([]);
+    setHasMore(true);
+  }, [selectedCategory, searchTerm]);
+
+  const fetchCategories = async () => {
     try {
-      const [prodRes, catRes] = await Promise.all([
-        fetch('/api/products'),
-        fetch('/api/categories'),
-      ]);
-      const prodData = await prodRes.json();
-      const catData = await catRes.json();
-      setProducts(Array.isArray(prodData) ? prodData : []);
-      setCategories(Array.isArray(catData) ? catData : []);
+      const res = await fetch('/api/categories');
+      const data = await res.json();
+      setCategories(Array.isArray(data) ? data : []);
     } catch (e) {
-      console.error('Fetch error:', e);
-    } finally {
-      setLoading(false);
+      console.error('Fetch categories error:', e);
     }
   };
 
-  const filteredProducts = products.filter((p) => {
-    const matchCat = selectedCategory === 'all' || p.categoryId === selectedCategory;
-    const matchSearch = p.name.toLowerCase().includes(searchTerm.toLowerCase());
-    return matchCat && matchSearch;
-  });
+  const fetchProducts = async (isInitial = false) => {
+    if (isInitial) setLoading(true);
+    else setLoadingMore(true);
 
-  /* Cart actions */
+    try {
+      const params = new URLSearchParams({
+        limit: LIMIT.toString(),
+        offset: isInitial ? '0' : offset.toString(),
+        categoryId: selectedCategory === 'all' ? '' : selectedCategory,
+        search: searchTerm,
+      });
+
+      const res = await fetch(`/api/products?${params}`);
+      const data = await res.json();
+
+      if (data.products) {
+        setProducts(prev => isInitial ? data.products : [...prev, ...data.products]);
+        setHasMore(data.hasMore);
+      }
+    } catch (e) {
+      console.error('Fetch products error:', e);
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  };
+
   const addToCart = useCallback((product: Product) => {
     setCart((prev) => {
       const existing = prev.find((i) => i.id === product.id);
@@ -188,27 +229,28 @@ export default function MiniApp() {
   const cartCount = cart.reduce((s, i) => s + i.quantity, 0);
   const cartTotal = cart.reduce((s, i) => s + i.price * i.quantity, 0);
 
-  const getCartQuantity = (productId: string) => {
-    return cart.find((i) => i.id === productId)?.quantity || 0;
-  };
-
-  /* Submit order */
   const submitOrder = async () => {
     if (!customerName.trim() || !customerPhone.trim() || !address.trim()) return;
     setOrderSending(true);
 
     try {
-      // Send to Telegram
+      // 1. Send to server for database and Telegram Notification
+      const res = await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: customerName,
+          phone: customerPhone,
+          address,
+          items: cart.map((i) => ({ id: i.id, name: i.name, quantity: i.quantity, price: i.price })),
+          total: cartTotal,
+        }),
+      });
+
+      if (!res.ok) throw new Error('Order creation failed');
+
+      // 2. Send to Telegram (Optional service message)
       const tg = typeof window !== 'undefined' ? (window as any).Telegram?.WebApp : null;
-
-      const orderText =
-        `📦 YANGI BUYURTMA!\n\n` +
-        `👤 Ism: ${customerName}\n` +
-        `📞 Tel: ${customerPhone}\n` +
-        `📍 Manzil: ${address}\n\n` +
-        `🛍 Mahsulotlar:\n${cart.map((i) => `  • ${i.name} × ${i.quantity} = ${formatPrice(i.price * i.quantity)} so'm`).join('\n')}\n\n` +
-        `💰 Jami: ${formatPrice(cartTotal)} so'm`;
-
       if (tg) {
         tg.sendData(JSON.stringify({
           type: 'order',
@@ -224,7 +266,6 @@ export default function MiniApp() {
       setTimeout(() => {
         setCart([]);
         setShowCheckout(false);
-        setShowCart(false);
         setOrderSent(false);
         setCustomerName('');
         setCustomerPhone('');
@@ -233,50 +274,38 @@ export default function MiniApp() {
       }, 2500);
     } catch (e) {
       console.error('Order error:', e);
+      alert('Buyurtmani yuborishda xatolik yuz berdi. Iltimos qaytadan urinib ko\'ring.');
     } finally {
       setOrderSending(false);
     }
   };
 
-  /* ═══ RENDER ═══ */
   return (
-    <div className="min-h-screen relative" style={{ background: 'var(--bg-primary)' }}>
-      {/* ── Ambient background ── */}
-      <div className="fixed inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-[-20%] left-[-15%] w-[50%] h-[50%] rounded-full opacity-30"
-          style={{ background: 'radial-gradient(circle, rgba(99,102,241,0.12) 0%, transparent 70%)' }} />
-        <div className="absolute bottom-[-15%] right-[-10%] w-[45%] h-[45%] rounded-full opacity-25"
-          style={{ background: 'radial-gradient(circle, rgba(168,85,247,0.1) 0%, transparent 70%)' }} />
+    <div className="min-h-screen relative overflow-x-hidden" style={{ background: 'var(--bg-primary)' }}>
+      {/* Ambient BG */}
+      <div className="fixed inset-0 pointer-events-none">
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full blur-[120px] opacity-20 bg-indigo-600" />
+        <div className="absolute bottom-[10%] right-[-10%] w-[50%] h-[50%] rounded-full blur-[150px] opacity-10 bg-purple-600" />
       </div>
 
-      {/* ══════════ HEADER ══════════ */}
-      <header className="sticky top-0 z-40 glass" style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg"
-              style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}>
-              🛍
+      <header className="sticky top-0 z-40 glass border-b border-white/5">
+        <div className="max-w-lg mx-auto px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-2xl flex items-center justify-center text-xl bg-gradient-to-br from-indigo-500 to-purple-600 shadow-lg shadow-indigo-500/20">
+              ⚡
             </div>
             <div>
-              <h1 className="text-base font-extrabold tracking-tight leading-none"
-                style={{ color: 'var(--text-primary)' }}>
-                BOZORCHA
-              </h1>
-              <p className="text-[10px] font-medium tracking-wider uppercase"
-                style={{ color: 'var(--text-muted)' }}>
-                Premium Do'kon
-              </p>
+              <h1 className="text-lg font-black tracking-tight" style={{ color: 'var(--text-primary)' }}>PREMIUM STORE</h1>
+              <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest leading-none">The Future of Shopping</p>
             </div>
           </div>
-          <button
+          <button 
             onClick={() => setShowCart(true)}
-            className="relative p-2.5 rounded-xl transition-all duration-200 active:scale-90"
-            style={{ background: 'var(--accent-glow)', border: '1px solid var(--border)' }}
+            className="p-2.5 rounded-2xl glass active:scale-95 transition-all relative border border-white/10"
           >
             {Icons.cart}
             {cartCount > 0 && (
-              <span className="absolute -top-1.5 -right-1.5 min-w-[20px] h-5 flex items-center justify-center rounded-full text-[10px] font-bold text-white px-1"
-                style={{ background: 'var(--accent)' }}>
+              <span className="absolute -top-1.5 -right-1.5 w-5 h-5 flex items-center justify-center rounded-full text-[10px] font-bold text-white bg-indigo-500 ring-2 ring-[#0a0a0f]">
                 {cartCount}
               </span>
             )}
@@ -284,413 +313,235 @@ export default function MiniApp() {
         </div>
       </header>
 
-      {/* ══════════ MAIN CONTENT ══════════ */}
-      <main className="max-w-lg mx-auto px-4 pb-32 relative z-10">
-
-        {/* ── Search ── */}
-        <div className="mt-4 mb-4 animate-fade-up">
-          <div className="relative rounded-2xl overflow-hidden"
-            style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
-            <div className="absolute left-3.5 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }}>
+      <main className="max-w-lg mx-auto px-4 pb-32">
+        {/* Search */}
+        <div className="mt-6 animate-fade-up">
+          <div className="relative group">
+            <div className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-indigo-400 transition-colors">
               {Icons.search}
             </div>
             <input
               type="text"
-              placeholder="Qidirish..."
-              className="w-full bg-transparent pl-11 pr-4 py-3.5 text-sm font-medium"
-              style={{ color: 'var(--text-primary)' }}
+              placeholder="Eksklyuziv mahsulotlarni qidirish..."
+              className="w-full pl-12 pr-4 py-4 rounded-2xl glass border border-white/5 focus:border-indigo-500/50 transition-all text-sm font-medium"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
             />
           </div>
         </div>
 
-        {/* ── Categories ── */}
-        <div ref={catScrollRef} className="flex gap-2 overflow-x-auto pb-4 no-scrollbar animate-fade-up" style={{ animationDelay: '0.1s' }}>
+        {/* Categories */}
+        <div className="flex gap-2 overflow-x-auto py-6 no-scrollbar stagger-children">
           <button
             onClick={() => setSelectedCategory('all')}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all duration-200"
-            style={{
-              background: selectedCategory === 'all' ? 'var(--accent)' : 'var(--bg-card)',
-              color: selectedCategory === 'all' ? '#fff' : 'var(--text-secondary)',
-              border: `1px solid ${selectedCategory === 'all' ? 'var(--accent)' : 'var(--border)'}`,
-              ...(selectedCategory === 'all' ? { boxShadow: '0 4px 15px -3px rgba(99,102,241,0.3)' } : {}),
-            }}
+            className={`px-5 py-2.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all border ${
+              selectedCategory === 'all' 
+              ? 'bg-indigo-500 text-white border-indigo-400 shadow-lg shadow-indigo-500/30' 
+              : 'glass text-gray-400 border-white/5'
+            }`}
           >
-            {Icons.grid} Barchasi
+            Barchasi
           </button>
           {categories.map((cat) => (
             <button
               key={cat.id}
               onClick={() => setSelectedCategory(cat.id)}
-              className="px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all duration-200"
-              style={{
-                background: selectedCategory === cat.id ? 'var(--accent)' : 'var(--bg-card)',
-                color: selectedCategory === cat.id ? '#fff' : 'var(--text-secondary)',
-                border: `1px solid ${selectedCategory === cat.id ? 'var(--accent)' : 'var(--border)'}`,
-                ...(selectedCategory === cat.id ? { boxShadow: '0 4px 15px -3px rgba(99,102,241,0.3)' } : {}),
-              }}
+              className={`px-5 py-2.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all border ${
+                selectedCategory === cat.id 
+                ? 'bg-indigo-500 text-white border-indigo-400 shadow-lg shadow-indigo-500/30' 
+                : 'glass text-gray-400 border-white/5'
+              }`}
             >
               {cat.name}
             </button>
           ))}
         </div>
 
-        {/* ── Products Grid ── */}
-        {loading ? (
-          <div className="grid grid-cols-2 gap-3 mt-2">
-            {[1, 2, 3, 4].map((i) => (
-              <div key={i} className="rounded-2xl overflow-hidden"
-                style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
-                <div className="h-40 animate-shimmer" style={{ background: 'var(--bg-elevated)' }} />
-                <div className="p-3 space-y-2">
-                  <div className="h-3 rounded-full animate-shimmer" style={{ background: 'var(--bg-elevated)', width: '70%' }} />
-                  <div className="h-3 rounded-full animate-shimmer" style={{ background: 'var(--bg-elevated)', width: '40%' }} />
+        {/* Grid */}
+        <div className="grid grid-cols-2 gap-4 stagger-children">
+          {products.map((prod, idx) => (
+            <div 
+              key={prod.id} 
+              ref={idx === products.length - 1 ? lastProductElementRef : null}
+              className="group relative rounded-3xl overflow-hidden glass border border-white/5 hover:border-indigo-500/30 transition-all duration-300"
+              onClick={() => setSelectedProduct(prod)}
+            >
+              <div className="aspect-square overflow-hidden bg-[#1a1a28]">
+                {prod.image ? (
+                  <img src={prod.image} alt={prod.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center opacity-30">{Icons.package}</div>
+                )}
+                <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-[#12121a] to-transparent" />
+              </div>
+              
+              <div className="p-3 relative">
+                <h3 className="text-sm font-bold text-white mb-1 line-clamp-1">{prod.name}</h3>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-black text-indigo-400">{formatPrice(prod.price)}</span>
+                    <span className="text-[10px] text-gray-500 ml-0.5 font-bold uppercase">UZS</span>
+                  </div>
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); addToCart(prod); }}
+                    className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all ${
+                      addedProductId === prod.id ? 'bg-green-500' : 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/20'
+                    }`}
+                  >
+                    {addedProductId === prod.id ? Icons.check : Icons.plus}
+                  </button>
                 </div>
               </div>
-            ))}
-          </div>
-        ) : filteredProducts.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 animate-fade-up">
-            {Icons.package}
-            <p className="mt-4 text-sm font-semibold" style={{ color: 'var(--text-muted)' }}>
-              Mahsulotlar topilmadi
-            </p>
-            <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-              Boshqa kategoriyani tanlang yoki qidiruv so'zini o'zgartiring
-            </p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-2 gap-3 mt-2 stagger-children">
-            {filteredProducts.map((prod) => {
-              const inCartQty = getCartQuantity(prod.id);
-              const justAdded = addedProductId === prod.id;
-              return (
-                <div
-                  key={prod.id}
-                  className="rounded-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02]"
-                  style={{
-                    background: 'var(--bg-card)',
-                    border: `1px solid ${inCartQty > 0 ? 'rgba(99,102,241,0.3)' : 'var(--border)'}`,
-                  }}
-                >
-                  {/* Image */}
-                  <div className="relative h-40 overflow-hidden" style={{ background: 'var(--bg-elevated)' }}>
-                    {prod.image ? (
-                      <img
-                        src={prod.image}
-                        alt={prod.name}
-                        className="w-full h-full object-cover transition-transform duration-500"
-                        loading="lazy"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center">
-                        {Icons.package}
-                      </div>
-                    )}
-                    {/* Category badge */}
-                    {prod.category && (
-                      <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider"
-                        style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)', color: 'var(--accent-light)' }}>
-                        {prod.category.name}
-                      </div>
-                    )}
-                    {/* In cart badge */}
-                    {inCartQty > 0 && (
-                      <div className="absolute top-2 right-2 w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold text-white"
-                        style={{ background: 'var(--accent)' }}>
-                        {inCartQty}
-                      </div>
-                    )}
-                    {/* Gradient overlay */}
-                    <div className="absolute inset-x-0 bottom-0 h-16"
-                      style={{ background: 'linear-gradient(to top, var(--bg-card), transparent)' }} />
-                  </div>
+            </div>
+          ))}
+        </div>
 
-                  {/* Info */}
-                  <div className="p-3 pt-1">
-                    <h3 className="text-sm font-bold leading-tight mb-1 line-clamp-2"
-                      style={{ color: 'var(--text-primary)' }}>
-                      {prod.name}
-                    </h3>
-                    {prod.description && (
-                      <p className="text-[11px] leading-relaxed mb-2 line-clamp-2"
-                        style={{ color: 'var(--text-muted)' }}>
-                        {prod.description}
-                      </p>
-                    )}
-                    <div className="flex items-center justify-between mt-auto">
-                      <div>
-                        <span className="text-sm font-extrabold" style={{ color: 'var(--text-primary)' }}>
-                          {formatPrice(prod.price)}
-                        </span>
-                        <span className="text-[10px] ml-0.5 font-medium" style={{ color: 'var(--text-muted)' }}>
-                          so'm
-                        </span>
-                      </div>
-                      <button
-                        onClick={() => addToCart(prod)}
-                        className="w-9 h-9 rounded-xl flex items-center justify-center transition-all duration-200 active:scale-90"
-                        style={{
-                          background: justAdded ? 'var(--success)' : 'var(--accent)',
-                          color: '#fff',
-                          boxShadow: '0 4px 12px -3px rgba(99,102,241,0.3)',
-                        }}
-                      >
-                        {justAdded ? Icons.check : Icons.plus}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+        {(loading || loadingMore) && (
+          <div className="flex justify-center py-10">
+            <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
           </div>
+        )}
+
+        {!hasMore && products.length > 0 && (
+          <p className="text-center py-10 text-xs font-bold text-gray-600 uppercase tracking-widest">Siz hamma narsani ko'rdingiz ✨</p>
         )}
       </main>
 
-      {/* ══════════ FLOATING CART BAR ══════════ */}
-      {cartCount > 0 && !showCart && (
-        <div className="fixed bottom-4 left-4 right-4 z-30 max-w-lg mx-auto animate-slide-up">
-          <button
+      {/* Floating Cart */}
+      {cartCount > 0 && (
+        <div className="fixed bottom-6 left-4 right-4 z-40 max-w-lg mx-auto">
+          <button 
             onClick={() => setShowCart(true)}
-            className="w-full py-3.5 px-5 rounded-2xl flex items-center justify-between transition-all active:scale-[0.98]"
-            style={{
-              background: 'linear-gradient(135deg, #6366f1, #7c3aed)',
-              boxShadow: '0 8px 32px -4px rgba(99, 102, 241, 0.4), 0 0 0 1px rgba(255,255,255,0.1) inset',
-            }}
+            className="w-full py-4 px-6 rounded-3xl bg-indigo-500 text-white flex items-center justify-between shadow-2xl shadow-indigo-500/40 border border-indigo-400/50 active:scale-95 transition-all"
           >
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold"
-                style={{ background: 'rgba(255,255,255,0.15)' }}>
+            <div className="flex items-center gap-4">
+              <div className="w-10 h-10 rounded-2xl bg-white/20 flex items-center justify-center font-black">
                 {cartCount}
               </div>
-              <span className="text-sm font-bold text-white">Savatcha</span>
+              <span className="font-black text-sm uppercase tracking-wider">Xaridlar Savatchasi</span>
             </div>
-            <span className="text-sm font-extrabold text-white">
-              {formatPrice(cartTotal)} so'm
-            </span>
+            <span className="font-black text-lg">{formatPrice(cartTotal)}</span>
           </button>
         </div>
       )}
 
-      {/* ══════════ CART DRAWER ══════════ */}
-      {showCart && (
-        <div className="fixed inset-0 z-50 animate-fade-in">
-          <div className="absolute inset-0" style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }}
-            onClick={() => setShowCart(false)} />
-          <div className="absolute bottom-0 left-0 right-0 max-h-[85vh] flex flex-col animate-slide-up"
-            style={{ background: 'var(--bg-primary)', borderRadius: '24px 24px 0 0', border: '1px solid var(--border)', borderBottom: 'none' }}>
-
-            {/* Handle */}
-            <div className="flex justify-center pt-3 pb-1">
-              <div className="w-10 h-1 rounded-full" style={{ background: 'var(--border-hover)' }} />
-            </div>
-
-            {/* Header */}
-            <div className="flex items-center justify-between px-5 py-3">
-              <h2 className="text-lg font-extrabold" style={{ color: 'var(--text-primary)' }}>
-                Savatcha
-                <span className="ml-2 text-xs px-2 py-0.5 rounded-full font-bold"
-                  style={{ background: 'var(--accent-glow)', color: 'var(--accent-light)' }}>
-                  {cartCount}
-                </span>
-              </h2>
-              <button onClick={() => setShowCart(false)}
-                className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors"
-                style={{ background: 'var(--bg-card)', color: 'var(--text-muted)' }}>
-                {Icons.x}
-              </button>
-            </div>
-
-            {/* Items */}
-            <div className="flex-1 overflow-y-auto px-5 pb-4 space-y-3 no-scrollbar">
-              {cart.length === 0 ? (
-                <div className="flex flex-col items-center py-16">
-                  {Icons.bag}
-                  <p className="mt-3 text-sm font-medium" style={{ color: 'var(--text-muted)' }}>
-                    Savatchingiz bo'sh
-                  </p>
-                </div>
-              ) : (
-                cart.map((item) => (
-                  <div key={item.id} className="flex gap-3 p-3 rounded-xl"
-                    style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
-                    {/* Image */}
-                    <div className="w-16 h-16 rounded-lg overflow-hidden flex-shrink-0"
-                      style={{ background: 'var(--bg-elevated)' }}>
-                      {item.image ? (
-                        <img src={item.image} alt={item.name} className="w-full h-full object-cover" />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center text-lg">📦</div>
-                      )}
-                    </div>
-                    {/* Info */}
-                    <div className="flex-1 min-w-0">
-                      <h4 className="text-sm font-bold truncate" style={{ color: 'var(--text-primary)' }}>
-                        {item.name}
-                      </h4>
-                      <p className="text-xs font-bold mt-0.5" style={{ color: 'var(--accent-light)' }}>
-                        {formatPrice(item.price)} so'm
-                      </p>
-                      <div className="flex items-center justify-between mt-2">
-                        <div className="flex items-center gap-1 rounded-lg overflow-hidden"
-                          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
-                          <button onClick={() => updateQuantity(item.id, -1)}
-                            className="w-8 h-8 flex items-center justify-center transition-colors"
-                            style={{ color: 'var(--text-muted)' }}>
-                            {Icons.minus}
-                          </button>
-                          <span className="w-8 text-center text-sm font-bold" style={{ color: 'var(--text-primary)' }}>
-                            {item.quantity}
-                          </span>
-                          <button onClick={() => updateQuantity(item.id, 1)}
-                            className="w-8 h-8 flex items-center justify-center transition-colors"
-                            style={{ color: 'var(--accent-light)' }}>
-                            {Icons.plus}
-                          </button>
-                        </div>
-                        <button onClick={() => removeFromCart(item.id)}
-                          className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors"
-                          style={{ color: 'var(--danger)' }}>
-                          {Icons.trash}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-
-            {/* Footer */}
-            {cart.length > 0 && (
-              <div className="px-5 py-4" style={{ borderTop: '1px solid var(--border)' }}>
-                <div className="flex items-center justify-between mb-4">
-                  <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
-                    Jami
-                  </span>
-                  <span className="text-xl font-extrabold" style={{ color: 'var(--text-primary)' }}>
-                    {formatPrice(cartTotal)} <span className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>so'm</span>
+      {/* Product Modal */}
+      {selectedProduct && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:p-6 animate-fade-in">
+          <div className="absolute inset-0 bg-black/90 backdrop-blur-xl" onClick={() => setSelectedProduct(null)} />
+          <div className="relative w-full max-w-lg glass rounded-[40px] border border-white/10 overflow-hidden animate-slide-up max-h-[90vh] flex flex-col">
+            <button className="absolute top-6 right-6 z-10 w-10 h-10 rounded-full glass border border-white/10 flex items-center justify-center" onClick={() => setSelectedProduct(null)}>
+              {Icons.x}
+            </button>
+            <div className="overflow-y-auto no-scrollbar">
+              <div className="aspect-square w-full bg-[#1a1a28]">
+                {selectedProduct.image && <img src={selectedProduct.image} alt="" className="w-full h-full object-cover" />}
+              </div>
+              <div className="p-8">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="px-3 py-1 rounded-full bg-indigo-500/10 text-indigo-400 text-[10px] font-black uppercase tracking-widest border border-indigo-500/20">
+                    {selectedProduct.category?.name || 'Exclusive'}
                   </span>
                 </div>
-                <button
-                  onClick={() => { setShowCart(false); setShowCheckout(true); }}
-                  className="w-full py-4 rounded-2xl text-sm font-bold text-white transition-all active:scale-[0.98] flex items-center justify-center gap-2"
-                  style={{
-                    background: 'linear-gradient(135deg, #6366f1, #7c3aed)',
-                    boxShadow: '0 8px 24px -4px rgba(99, 102, 241, 0.35)',
-                  }}
+                <h2 className="text-3xl font-black text-white mb-4 leading-tight">{selectedProduct.name}</h2>
+                <div className="flex items-end gap-2 mb-6">
+                  <span className="text-4xl font-black text-white">{formatPrice(selectedProduct.price)}</span>
+                  <span className="text-xs font-bold text-indigo-400 mb-2 uppercase">so'm</span>
+                </div>
+                <p className="text-gray-400 text-sm leading-relaxed mb-8">{selectedProduct.description || "Ushbu mahsulot haqida ma'lumot kam."}</p>
+                <button 
+                  onClick={() => { addToCart(selectedProduct); setSelectedProduct(null); }}
+                  className="w-full py-5 rounded-3xl bg-indigo-500 text-white font-black text-lg shadow-xl shadow-indigo-500/30 active:scale-95 transition-all"
                 >
-                  Buyurtma berish {Icons.send}
+                  Savatga Qo'shish
                 </button>
               </div>
-            )}
+            </div>
           </div>
         </div>
       )}
 
-      {/* ══════════ CHECKOUT MODAL ══════════ */}
-      {showCheckout && (
+      {/* Cart Drawer & Checkout (Simplified for brevity but with UI polish) */}
+      {showCart && (
         <div className="fixed inset-0 z-50 animate-fade-in">
-          <div className="absolute inset-0" style={{ background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(6px)' }}
-            onClick={() => !orderSending && setShowCheckout(false)} />
-          <div className="absolute bottom-0 left-0 right-0 animate-slide-up"
-            style={{ background: 'var(--bg-primary)', borderRadius: '24px 24px 0 0', border: '1px solid var(--border)', borderBottom: 'none' }}>
-
-            <div className="flex justify-center pt-3 pb-1">
-              <div className="w-10 h-1 rounded-full" style={{ background: 'var(--border-hover)' }} />
+          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setShowCart(false)} />
+          <div className="absolute bottom-0 left-0 right-0 max-h-[85vh] flex flex-col glass rounded-t-[40px] border-t border-white/10 animate-slide-up">
+            <div className="flex justify-center py-4"><div className="w-12 h-1.5 rounded-full bg-white/10" /></div>
+            <div className="p-6 flex-1 overflow-y-auto no-scrollbar">
+              <h2 className="text-2xl font-black mb-6">SAVATCHA</h2>
+              <div className="space-y-4">
+                {cart.map((item) => (
+                  <div key={item.id} className="flex gap-4 p-4 rounded-3xl glass border border-white/5">
+                    <div className="w-20 h-20 rounded-2xl overflow-hidden bg-[#1a1a28] flex-shrink-0">
+                      {item.image && <img src={item.image} alt="" className="w-full h-full object-cover" />}
+                    </div>
+                    <div className="flex-1">
+                      <h4 className="font-bold text-sm mb-1">{item.name}</h4>
+                      <div className="flex items-center justify-between">
+                        <span className="text-indigo-400 font-bold">{formatPrice(item.price)}</span>
+                        <div className="flex items-center gap-3">
+                          <button onClick={() => updateQuantity(item.id, -1)} className="w-8 h-8 rounded-lg glass flex items-center justify-center font-bold">{Icons.minus}</button>
+                          <span className="font-black">{item.quantity}</span>
+                          <button onClick={() => updateQuantity(item.id, 1)} className="w-8 h-8 rounded-lg glass flex items-center justify-center font-bold">{Icons.plus}</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
+            <div className="p-8 border-t border-white/10">
+              <div className="flex justify-between mb-6">
+                <span className="text-gray-500 font-bold">JAMI SUMMA:</span>
+                <span className="text-2xl font-black">{formatPrice(cartTotal)}</span>
+              </div>
+              <button 
+                onClick={() => { setShowCart(false); setShowCheckout(true); }}
+                className="w-full py-5 rounded-3xl bg-indigo-500 text-white font-black text-lg"
+              >
+                RASMIYLASHTIRISH
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
+      {/* Checkout Modal */}
+      {showCheckout && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className="absolute inset-0 bg-black/90 backdrop-blur-xl" onClick={() => !orderSending && setShowCheckout(false)} />
+          <div className="relative w-full max-w-sm glass rounded-[40px] border border-white/10 p-8 animate-slide-up">
             {orderSent ? (
-              <div className="flex flex-col items-center py-12 px-6">
-                <div className="w-16 h-16 rounded-full flex items-center justify-center mb-4 animate-float"
-                  style={{ background: 'rgba(34,197,94,0.15)' }}>
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M20 6 9 17l-5-5"/>
-                  </svg>
-                </div>
-                <h3 className="text-lg font-extrabold mb-1" style={{ color: 'var(--text-primary)' }}>
-                  Buyurtma qabul qilindi!
-                </h3>
-                <p className="text-sm text-center" style={{ color: 'var(--text-muted)' }}>
-                  Tez orada siz bilan bog'lanamiz
-                </p>
-              </div>
+               <div className="text-center py-10">
+                 <div className="w-20 h-20 rounded-full bg-green-500/20 flex items-center justify-center mx-auto mb-6 animate-float">{Icons.check}</div>
+                 <h2 className="text-2xl font-black mb-2">Qabul Qilindi!</h2>
+                 <p className="text-gray-400 text-sm">Buyurtmangiz muvaffaqiyatli yuborildi. Tez orada bog'lanamiz.</p>
+               </div>
             ) : (
-              <div className="px-5 py-4">
-                <h2 className="text-lg font-extrabold mb-5" style={{ color: 'var(--text-primary)' }}>
-                  Buyurtma ma'lumotlari
-                </h2>
-
-                <div className="space-y-3">
-                  {/* Name */}
+              <>
+                <h2 className="text-2xl font-black mb-6">BUYURTMA BERISH</h2>
+                <div className="space-y-4 mb-6">
                   <div className="relative">
-                    <div className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }}>
-                      {Icons.user}
-                    </div>
-                    <input
-                      type="text"
-                      placeholder="Ismingiz"
-                      value={customerName}
-                      onChange={(e) => setCustomerName(e.target.value)}
-                      className="w-full pl-11 pr-4 py-3.5 rounded-xl text-sm font-medium"
-                      style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
-                    />
+                    <div className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500">{Icons.user}</div>
+                    <input type="text" placeholder="Ismingiz" className="w-full pl-12 pr-4 py-4 rounded-2xl glass border border-white/5 text-sm font-bold" value={customerName} onChange={e => setCustomerName(e.target.value)} />
                   </div>
-                  {/* Phone */}
                   <div className="relative">
-                    <div className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }}>
-                      {Icons.phone}
-                    </div>
-                    <input
-                      type="tel"
-                      placeholder="+998 90 123 45 67"
-                      value={customerPhone}
-                      onChange={(e) => setCustomerPhone(e.target.value)}
-                      className="w-full pl-11 pr-4 py-3.5 rounded-xl text-sm font-medium"
-                      style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
-                    />
+                    <div className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500">{Icons.phone}</div>
+                    <input type="tel" placeholder="+998 90..." className="w-full pl-12 pr-4 py-4 rounded-2xl glass border border-white/5 text-sm font-bold" value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} />
                   </div>
-                  {/* Address */}
                   <div className="relative">
-                    <div className="absolute left-3 top-3.5" style={{ color: 'var(--text-muted)' }}>
-                      {Icons.mapPin}
-                    </div>
-                    <textarea
-                      placeholder="Yetkazib berish manzili"
-                      value={address}
-                      onChange={(e) => setAddress(e.target.value)}
-                      rows={2}
-                      className="w-full pl-11 pr-4 py-3.5 rounded-xl text-sm font-medium resize-none"
-                      style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
-                    />
+                    <div className="absolute left-4 top-4 text-gray-500">{Icons.mapPin}</div>
+                    <textarea placeholder="Yetkazib berish manzili" className="w-full pl-12 pr-4 py-4 rounded-2xl glass border border-white/5 text-sm font-bold min-h-[100px]" value={address} onChange={e => setAddress(e.target.value)} />
                   </div>
                 </div>
-
-                {/* Summary */}
-                <div className="mt-4 p-3 rounded-xl" style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span style={{ color: 'var(--text-muted)' }}>{cart.length} ta mahsulot</span>
-                    <span className="font-bold" style={{ color: 'var(--text-primary)' }}>{formatPrice(cartTotal)} so'm</span>
-                  </div>
-                  <div className="flex justify-between text-xs">
-                    <span style={{ color: 'var(--text-muted)' }}>Yetkazib berish</span>
-                    <span className="font-bold" style={{ color: 'var(--success)' }}>Bepul</span>
-                  </div>
-                </div>
-
-                <button
+                <button 
                   onClick={submitOrder}
-                  disabled={orderSending || !customerName.trim() || !customerPhone.trim() || !address.trim()}
-                  className="w-full mt-4 mb-4 py-4 rounded-2xl text-sm font-bold text-white transition-all active:scale-[0.98] disabled:opacity-40 flex items-center justify-center gap-2"
-                  style={{
-                    background: 'linear-gradient(135deg, #6366f1, #7c3aed)',
-                    boxShadow: '0 8px 24px -4px rgba(99, 102, 241, 0.35)',
-                  }}
+                  disabled={orderSending || !customerName || !customerPhone || !address}
+                  className="w-full py-5 rounded-3xl bg-indigo-500 text-white font-black text-lg shadow-xl shadow-indigo-500/30 disabled:opacity-30"
                 >
-                  {orderSending ? 'Yuborilmoqda...' : 'Buyurtmani tasdiqlash'}
-                  {!orderSending && Icons.send}
+                  {orderSending ? 'YUBORILMOQDA...' : 'TASDIQLASH'}
                 </button>
-              </div>
+              </>
             )}
           </div>
         </div>
